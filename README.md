@@ -1,20 +1,70 @@
-<div align="center">
-<img width="1200" height="475" alt="GHBanner" src="https://ai.google.dev/static/site-assets/images/share-ais-513315318.png" />
-</div>
+# 🚀 프로젝트 이름
 
-# Run and deploy your AI Studio app
+> 한 줄로 프로젝트를 소개해 주세요.
 
-This contains everything you need to run your app locally.
+<!-- 대표 이미지나 시연 GIF가 있다면 여기에 넣어주세요. -->
 
-View your app in AI Studio: https://ai.studio/apps/30c15640-2948-453e-8bd2-a40683e41c19
+<br>
 
-## Run Locally
+## 📖 프로젝트 소개
 
-**Prerequisites:**  Node.js
+- **기간**: 2026.00.00 ~ 2026.00.00
+- **프로젝트**: 예) 2026 웹 프로젝트, 2026 해커톤
+- **소개**: 어떤 문제를 해결하고 싶었는지, 누구를 위한 서비스인지 적어주세요.
 
+<br>
 
-1. Install dependencies:
-   `npm install`
-2. Set the `GEMINI_API_KEY` in [.env.local](.env.local) to your Gemini API key
-3. Run the app:
-   `npm run dev`
+## ✨ 주요 기능
+
+| 기능 | 설명 |
+| :-- | :-- |
+| 기능 1 | 설명 |
+| 기능 2 | 설명 |
+
+<br>
+
+## 🛠 기술 스택
+
+- **언어**:
+- **프레임워크 / 라이브러리**:
+- **도구**:
+
+<br>
+
+## 👥 팀원
+
+| <img src="https://github.com/깃허브아이디.png" width="100"> | <img src="https://github.com/깃허브아이디.png" width="100"> |
+| :--: | :--: |
+| [이름](https://github.com/깃허브아이디) | [이름](https://github.com/깃허브아이디) |
+| 역할 | 역할 |
+
+<br>
+
+## ▶️ 실행 방법
+
+```bash
+# 1. 저장소 받기
+git clone https://github.com/WayMakerSchool/저장소이름.git
+
+# 2. 실행에 필요한 명령어를 적어주세요.
+```
+
+<br>
+
+## 📁 폴더 구조
+
+```
+.
+├── src
+└── README.md
+```
+
+<br>
+
+## 🤝 협업 규칙
+
+- **브랜치**
+  - `develop`: 개발용 기본 브랜치. 모든 작업은 여기서 시작해요.
+  - `feat/기능이름`, `fix/버그이름`: `develop`에서 만들어서 작업하고, PR로 `develop`에 합쳐요.
+  - `main`: 발표나 배포할 때만 `develop`을 합쳐요.
+- **커밋 메시지**: `feat: 로그인 기능 추가`, `fix: 버튼 클릭 오류 수정`, `docs: README 수정`

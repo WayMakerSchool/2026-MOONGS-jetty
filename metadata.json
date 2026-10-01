@@ -1,0 +1,6 @@
+{
+  "name": "MOONGS",
+  "description": "스마트 정형외과 깁스 IoT 모니터링 및 AI 실시간 재활 보조 프로그램 (Smart Cast IoT Rehab Monitor & AI Coach)",
+  "requestFramePermissions": ["bluetooth"],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

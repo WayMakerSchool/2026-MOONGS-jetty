@@ -1,3 +1,5 @@
+<img width="446" height="848" alt="스크린샷 2026-10-01 오후 4 50 15" src="https://github.com/user-attachments/assets/35fbad22-e947-4ba1-bd5a-0f8cc6afd040" />
+
 # 🚀 프로젝트 이름
 
 > 한 줄로 프로젝트를 소개해 주세요.

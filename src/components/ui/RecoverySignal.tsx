@@ -3,10 +3,10 @@ import { Sparkles } from 'lucide-react';
 import { tokens } from '../../ui/theme';
 import playfulTrafficLight from '../../assets/images/playful-traffic-light.png';
 
-interface Props { lsi: number; balance: number; }
+interface Props { lsi: number; balance: number; pending?: boolean; }
 
-export default function RecoverySignal({ lsi, balance }: Props) {
-  const status = lsi >= 90 && balance >= 85 ? 'GO' : lsi >= 75 ? 'CAUTION' : 'STOP';
+export default function RecoverySignal({ lsi, balance, pending = false }: Props) {
+  const status = pending ? '—' : lsi >= 90 && balance >= 85 ? 'GO' : lsi >= 75 ? 'CAUTION' : 'STOP';
   const activePose: 'stop' | 'ready' | 'go' = status === 'GO' ? 'go' : status === 'CAUTION' ? 'ready' : 'stop';
   const statusColor = status === 'GO' ? '#C9F5D7' : status === 'CAUTION' ? '#F8C8A1' : '#F69AA1';
   return (
@@ -31,14 +31,14 @@ export default function RecoverySignal({ lsi, balance }: Props) {
             { pose: 'ready', cx: 521, cy: 851, rx: 164, ry: 175 },
             { pose: 'go', cx: 521, cy: 1358, rx: 164, ry: 178 },
           ] as const).map(({ pose, ...ellipse }) => (
-            <ellipse key={pose} {...ellipse} fill="#030406" opacity={activePose === pose ? 0 : .72} filter="url(#signal-lens-soften)" className="transition-opacity duration-700" />
+            <ellipse key={pose} {...ellipse} fill="#030406" opacity={!pending && activePose === pose ? 0 : .72} filter="url(#signal-lens-soften)" className="transition-opacity duration-700" />
           ))}
         </svg>
       </div>
 
       <div className="relative mt-4 text-center">
         <div className="inline-flex items-center gap-2 rounded-full border border-white/10 bg-black/30 px-4 py-2 backdrop-blur-xl"><span className="h-2 w-2 rounded-full" style={{ background: statusColor, boxShadow: `0 0 12px ${statusColor}` }}/><span className="text-[11px] font-bold tracking-[.16em] text-white">{status}</span></div>
-        <p className="mt-2 text-[11px] text-white/65">LSI {lsi}% · 보행 균형 {balance}점 기반</p>
+        <p className="mt-2 text-[11px] text-white/65">LSI {pending ? '—' : lsi}% · 보행 균형 {pending ? '—' : balance}점 기반</p>
       </div>
     </section>
   );

@@ -24,12 +24,12 @@ import { motion } from "motion/react";
 import { AppState, ChatMessage } from "../types";
 import { tokens } from "../ui/theme";
 import FootHeatmapSingle from "./FootHeatmapSingle";
+import SerialConnectionOptions from "./SerialConnectionOptions";
 import RecoverySignal from "./ui/RecoverySignal";
-
-const PROFILE_IMAGE = "/src/assets/images/profile.jpg";
 
 // Local storage saved session interface
 interface SavedSession {
+  pressure?: number[];
   id: string;
   date: string;
   weekNumber: number;
@@ -82,6 +82,7 @@ interface SmartCastScreenProps {
   onStartBluetoothScan?: () => void;
   onConnectBluetoothDevice?: (name: string) => void;
   onDisconnectBluetooth?: () => void;
+  onResetBluetooth?: () => void;
 
   // Serial specific props
   isSerialSupported?: boolean;
@@ -90,6 +91,10 @@ interface SmartCastScreenProps {
   onDisconnectSerial?: () => void;
   serialError?: string;
   latestRawSerialData?: string;
+  serialBaudRate?: number;
+  onSerialBaudRateChange?: (rate: number) => void;
+  onReconnectSerial?: () => void;
+  serialDiagnostic?: string;
 }
 
 export default function SmartCastScreen({
@@ -128,6 +133,7 @@ export default function SmartCastScreen({
   onStartBluetoothScan,
   onConnectBluetoothDevice,
   onDisconnectBluetooth,
+  onResetBluetooth,
 
   // Serial specific props
   isSerialSupported = false,
@@ -135,6 +141,7 @@ export default function SmartCastScreen({
   onConnectSerial,
   onDisconnectSerial,
   serialError,
+  serialBaudRate = 9600, onSerialBaudRateChange, onReconnectSerial, serialDiagnostic,
   latestRawSerialData = ""
 }: SmartCastScreenProps) {
   const [showArduinoCode, setShowArduinoCode] = useState(false);
@@ -151,21 +158,22 @@ export default function SmartCastScreen({
 
   // Initialize and load records from localStorage
   useEffect(() => {
-    const local = localStorage.getItem("moongs_gait_sessions");
+    const local = localStorage.getItem(state.telemetry ? "moongs_live_gait_sessions" : "moongs_gait_sessions");
     if (local) {
       try {
         setSavedRecords(JSON.parse(local));
       } catch (e) {
-        setSavedRecords(defaultMockHistory);
+        setSavedRecords(state.telemetry ? [] : defaultMockHistory);
       }
     } else {
-      setSavedRecords(defaultMockHistory);
-      localStorage.setItem("moongs_gait_sessions", JSON.stringify(defaultMockHistory));
+      setSavedRecords(state.telemetry ? [] : defaultMockHistory);
+      if (!state.telemetry) localStorage.setItem("moongs_gait_sessions", JSON.stringify(defaultMockHistory));
     }
-  }, []);
+  }, [!!state.telemetry]);
 
   // Save active gait session handler
   const handleSaveActiveSession = () => {
+    if (state.telemetry && !state.telemetry.received) return;
     const now = new Date();
     const dateStr = now.toISOString().replace("T", " ").substring(0, 16);
     
@@ -185,9 +193,20 @@ export default function SmartCastScreen({
       risk: state.sensorData.rightFoot.heel > 80 ? "높음" : state.gaitMetrics.balanceScore < 80 ? "보통" : "낮음"
     };
 
+    if (state.telemetry) {
+      Object.assign(newRecord, {
+        weekNumber: 0,
+        stepCount: state.telemetry.hasSteps ? state.gaitMetrics.stepCount : null,
+        balanceScore: state.telemetry.bilateral ? state.gaitMetrics.balanceScore : null,
+        leftRatio: state.telemetry.bilateral ? state.gaitMetrics.weightDistributionLeft : null,
+        rightRatio: state.telemetry.bilateral ? state.gaitMetrics.weightDistributionRight : null,
+        speed: null, lsi: null, similarity: null, leftStepCm: null, rightStepCm: null, risk: null,
+        pressure: [state.sensorData.rightFoot.piezo1, state.sensorData.rightFoot.piezo2, state.sensorData.rightFoot.piezo3, state.sensorData.rightFoot.piezo4].map(v => Math.round(v || 0))
+      });
+    }
     const updated = [newRecord, ...savedRecords];
     setSavedRecords(updated);
-    localStorage.setItem("moongs_gait_sessions", JSON.stringify(updated));
+    localStorage.setItem(state.telemetry ? "moongs_live_gait_sessions" : "moongs_gait_sessions", JSON.stringify(updated));
     alert(`💾 [데이터 저장 성공] ${dateStr} 기준 보행 데이터가 성공적으로 저장되었습니다!`);
   };
 
@@ -195,10 +214,14 @@ export default function SmartCastScreen({
   const handleDeleteRecord = (id: string) => {
     const updated = savedRecords.filter(r => r.id !== id);
     setSavedRecords(updated);
-    localStorage.setItem("moongs_gait_sessions", JSON.stringify(updated));
+    localStorage.setItem(state.telemetry ? "moongs_live_gait_sessions" : "moongs_gait_sessions", JSON.stringify(updated));
   };
 
   // State calculations for dynamic visual metrics
+  const live = !!state.telemetry;
+  const pressureReceived = state.telemetry?.hasPressure ?? state.telemetry?.received;
+  const bilateral = !live || !!state.telemetry?.bilateral;
+  const value = (v: number, available = false) => live && !available ? '—' : v;
   const lsiVal = state.gaitMetrics.lsiSymmetry;
   const similarityVal = state.gaitMetrics.gaitSimilarity;
   const currentSpeedMs = parseFloat((state.gaitMetrics.avgSpeedKmh / 3.6).toFixed(2));
@@ -257,11 +280,11 @@ export default function SmartCastScreen({
             </div>
             <div className="text-center border-x border-slate-200">
               <span className="text-[8px] font-bold text-slate-400 block uppercase">대칭도 (LSI)</span>
-              <span className="text-sm font-black text-indigo-600 font-mono mt-0.5 block">{lsiVal}%</span>
+              <span className="text-sm font-black text-indigo-600 font-mono mt-0.5 block">{value(lsiVal, !!pressureReceived)}%</span>
             </div>
             <div className="text-center">
               <span className="text-[8px] font-bold text-slate-400 block uppercase">정상 유사도</span>
-              <span className="text-sm font-black text-emerald-600 font-mono mt-0.5 block">{similarityVal}%</span>
+              <span className="text-sm font-black text-emerald-600 font-mono mt-0.5 block">{value(similarityVal, !!pressureReceived)}%</span>
             </div>
           </div>
 
@@ -332,7 +355,7 @@ export default function SmartCastScreen({
                 </span>
                 <p className="text-[9.5px] text-slate-600 mt-1 font-medium leading-tight">
                   {trafficLight === "red" && "수절 부위 과부하 감지. 보행을 보류하고 깁스 밀착도를 높이세요."}
-                  {trafficLight === "yellow" && "대칭성 LSI 94%로 회복 중입니다. 평지 위주 가벼운 산책만 권장합니다."}
+                  {trafficLight === "yellow" && `대칭성 LSI ${value(lsiVal, !!pressureReceived)}%로 회복 중입니다. 평지 위주 가벼운 산책만 권장합니다.`}
                   {trafficLight === "green" && "보행 대칭이 안정적입니다. 스포츠 복귀 준비가 가능합니다."}
                 </p>
               </div>
@@ -447,7 +470,8 @@ export default function SmartCastScreen({
                 </div>
               )}
 
-              {/* Scanned device listing */}
+              {onResetBluetooth && <button type="button" onClick={onResetBluetooth} className="min-h-10 w-full rounded-xl border border-white/15 text-xs font-semibold text-white/75">블루투스 초기화</button>}
+            {/* Scanned device listing */}
               {state.scannedDevices && state.scannedDevices.length > 0 && (
                 <div className="space-y-1 mt-2 max-h-24 overflow-y-auto pr-1">
                   {state.scannedDevices.map((dev) => (
@@ -468,17 +492,18 @@ export default function SmartCastScreen({
               )}
             </div>
 
+            {onSerialBaudRateChange && onReconnectSerial && <SerialConnectionOptions baudRate={serialBaudRate} onBaudRateChange={onSerialBaudRateChange} connected={isSerialConnected} onReconnect={onReconnectSerial} diagnostic={serialDiagnostic} />}
             {/* Wired Serial fallback header */}
             <div className="border-t border-white/5 pt-3">
               <span className="text-[10px] uppercase font-mono font-bold tracking-wider text-slate-300 block mb-2">
                 📡 아두이노 유선 시리얼 백업 링크
               </span>
 
-              {isSerialConnected ? (
+              {isSerialConnected || state.telemetry ? (
                 <div className="space-y-2 bg-slate-950 p-2.5 rounded-xl border border-white/5 font-mono text-[9px] text-emerald-400">
                   <div className="flex justify-between items-center border-b border-white/5 pb-1 mb-1 font-sans text-slate-400 font-bold">
-                    <span>🟢 아두이노 연결됨</span>
-                    <button onClick={onDisconnectSerial} className="text-rose-400 hover:underline">연결 해제</button>
+                    <span>🟢 {state.bluetoothDeviceName || "센서 연결됨"}</span>
+                    <button onClick={isSerialConnected ? onDisconnectSerial : onDisconnectBluetooth} className="text-rose-400 hover:underline">연결 해제</button>
                   </div>
                   <div className="flex justify-between">
                     <span className="text-slate-500">Live CSV Feed:</span>
@@ -580,10 +605,10 @@ void loop() {
     // SCREEN 2: ANALYSIS (COP, Speed, Step Length, Balance, Similarity)
     // ----------------------------------------------------
     case "analysis":
-      const minX = state.arduinoData ? state.arduinoData.minX : Math.round(20 + Math.sin(Date.now() / 2500) * 4);
-      const maxX = state.arduinoData ? state.arduinoData.maxX : Math.round(75 + Math.cos(Date.now() / 2500) * 6);
-      const minY = state.arduinoData ? state.arduinoData.minY : Math.round(15 + Math.sin(Date.now() / 2200) * 5);
-      const maxY = state.arduinoData ? state.arduinoData.maxY : Math.round(82 + Math.cos(Date.now() / 2200) * 8);
+      const minX = state.arduinoData ? state.arduinoData.minX : (live ? 0 : Math.round(20 + Math.sin(Date.now() / 2500) * 4));
+      const maxX = state.arduinoData ? state.arduinoData.maxX : (live ? 0 : Math.round(75 + Math.cos(Date.now() / 2500) * 6));
+      const minY = state.arduinoData ? state.arduinoData.minY : (live ? 0 : Math.round(15 + Math.sin(Date.now() / 2200) * 5));
+      const maxY = state.arduinoData ? state.arduinoData.maxY : (live ? 0 : Math.round(82 + Math.cos(Date.now() / 2200) * 8));
 
       return (
         <motion.div {...transitionConfig} className="glass screen-surface analysis-screen flex flex-col h-full text-slate-800 space-y-4 overflow-y-auto pb-24 px-3" style={{ color: tokens.color.text }}>
@@ -593,6 +618,7 @@ void loop() {
             <p className="mt-2 text-[11px] font-medium">센서 데이터를 바탕으로 오늘의 움직임을 읽어요</p>
           </div>
 
+          {state.imuData && <div className="analysis-card rounded-3xl border border-white/10 p-4"><h3 className="text-sm font-semibold">IMU 실시간 축 값</h3><p className="mt-2 font-mono text-sm">X: {state.imuData.x ?? '—'} · Y: {state.imuData.y ?? '—'} · Z: {state.imuData.z ?? '—'}</p></div>}
           {/* Feature 9: 보행 균형도 (Gait Balance) & Weight Distribution */}
           <div className="analysis-card analysis-card-balance bg-white p-4 rounded-3xl border border-slate-200 shadow-sm">
             <h3 className="text-xs font-black text-slate-900 flex items-center gap-1.5 mb-2.5">
@@ -602,30 +628,30 @@ void loop() {
             <div className="bg-slate-50 p-3.5 rounded-2xl border border-slate-100 space-y-2.5">
               <div className="flex justify-between items-center">
                 <span className="text-xs font-bold text-slate-600">균형 점수</span>
-                <span className="text-sm font-black text-emerald-600 font-mono">{state.gaitMetrics.balanceScore}점 / 100</span>
+                <span className="text-sm font-black text-emerald-600 font-mono">{value(state.gaitMetrics.balanceScore, bilateral)}점 / 100</span>
               </div>
 
               {/* Slider for Left-Right Weight Distribution */}
               <div className="space-y-1">
                 <div className="flex justify-between text-[9px] font-bold text-slate-500 px-1">
-                  <span>왼발 ({state.gaitMetrics.weightDistributionLeft}%)</span>
-                  <span>오른발 ({state.gaitMetrics.weightDistributionRight}%)</span>
+                  <span>왼발 ({value(state.gaitMetrics.weightDistributionLeft, bilateral)}%)</span>
+                  <span>오른발 ({value(state.gaitMetrics.weightDistributionRight, bilateral)}%)</span>
                 </div>
                 
                 <div className="w-full bg-slate-200 h-2 rounded-full overflow-hidden flex">
                   <div 
                     className="bg-indigo-500 h-full transition-all duration-500"
-                    style={{ width: `${state.gaitMetrics.weightDistributionLeft}%` }}
+                    style={{ width: `${bilateral ? state.gaitMetrics.weightDistributionLeft : 0}%` }}
                   />
                   <div 
                     className="bg-rose-500 h-full transition-all duration-500"
-                    style={{ width: `${state.gaitMetrics.weightDistributionRight}%` }}
+                    style={{ width: `${bilateral ? state.gaitMetrics.weightDistributionRight : 0}%` }}
                   />
                 </div>
               </div>
 
               <p className="text-[9.5px] text-slate-500 leading-tight text-center font-medium">
-                {state.gaitMetrics.weightDistributionLeft > 55 ? (
+                {!bilateral ? '—' : state.gaitMetrics.weightDistributionLeft > 55 ? (
                   <span>왼발 의존도가 높아 체중 분산이 필요합니다.</span>
                 ) : (
                   <span>좌우 균등한 하중 배분이 유지되고 있습니다.</span>
@@ -658,7 +684,7 @@ void loop() {
                 </g>
                 <path d="M82 144 C75 119 92 92 86 69 L80 42" fill="none" stroke="url(#cop-foot-route)" strokeWidth="1.6" strokeDasharray="3 3" strokeLinecap="round"/>
                 <circle cx="80" cy="42" r="3.5" fill="none" stroke="#a0ef9f" strokeWidth="1.8"/>
-                <circle cx={72 + ((minX + maxX) / 2) * .25} cy={144 - ((minY + maxY) / 2) * 1.02} r="3.8" fill="#79bcff" stroke="#c7e7ff" strokeWidth=".7"/>
+                <circle opacity={live && !state.arduinoData ? 0 : 1} cx={72 + ((minX + maxX) / 2) * .25} cy={144 - ((minY + maxY) / 2) * 1.02} r="3.8" fill="#79bcff" stroke="#c7e7ff" strokeWidth=".7"/>
                 <g fontFamily="inherit" fontSize="6" fill="#f0f4f1">
                   <text x="3" y="41">앞꿈치</text><text x="3" y="49" fill="#b7c2bc">(추진)</text>
                   <text x="3" y="91">발 중앙</text><text x="3" y="99" fill="#b7c2bc">(균형)</text>
@@ -671,7 +697,7 @@ void loop() {
                   <path d="M116 142H122" stroke="#bcd1c8" strokeDasharray="2 1"/><text x="125" y="144">기준 경로</text>
                 </g>
               </svg>
-              <div className="absolute bottom-2 inset-x-1 text-center text-[7px] text-white/60">{state.arduinoData ? '실시간 압력 중심' : '데모 압력 중심'} · 점선은 기준 경로</div>
+              <div className="absolute bottom-2 inset-x-1 text-center text-[7px] text-white/60">{state.arduinoData ? '실시간 압력 중심' : live ? '—' : '데모 압력 중심'} · 점선은 기준 경로</div>
             </div>
           </div>
 
@@ -680,9 +706,9 @@ void loop() {
             {/* Feature 7: 보행 속도 */}
             <div className="analysis-card analysis-card-speed flex min-w-0 flex-col justify-center bg-white p-3 rounded-3xl border border-slate-200 shadow-sm text-left">
               <h4 className="text-[10px] font-black text-slate-900 uppercase block mb-1">보행 속도</h4>
-              <span className="text-lg font-mono font-black text-indigo-600 block">{currentSpeedMs} m/s</span>
+              <span className="text-lg font-mono font-black text-indigo-600 block">{value(currentSpeedMs)} m/s</span>
               <p className="text-[8.5px] text-slate-500 leading-tight mt-1 font-medium">
-                정상 성인 대비 <strong className="text-indigo-600">{Math.round((currentSpeedMs/1.2)*100)}%</strong> 수준 달성
+                정상 성인 대비 <strong className="text-indigo-600">{value(Math.round((currentSpeedMs/1.2)*100))}%</strong> 수준 달성
               </p>
             </div>
 
@@ -690,11 +716,11 @@ void loop() {
             <div className="analysis-card analysis-card-step flex min-w-0 flex-col justify-center bg-white p-3 rounded-3xl border border-slate-200 shadow-sm text-left">
               <h4 className="text-[10px] font-black text-slate-900 uppercase block mb-1">보폭 (Step Length)</h4>
               <div className="flex flex-wrap gap-x-3 gap-y-1 items-baseline mt-1">
-                <span className="text-xs text-slate-600 block"><span className="font-bold">L:</span> 65cm</span>
-                <span className="text-xs text-slate-600 block"><span className="font-bold">R:</span> {58 + Math.round((state.gaitMetrics.balanceScore - 80) * 0.5)}cm</span>
+                <span className="text-xs text-slate-600 block"><span className="font-bold">L:</span> {live ? '—' : 65}cm</span>
+                <span className="text-xs text-slate-600 block"><span className="font-bold">R:</span> {value(58 + Math.round((state.gaitMetrics.balanceScore - 80) * 0.5))}cm</span>
               </div>
               <p className="text-[8.5px] text-slate-500 leading-tight mt-1.5 font-medium">
-                좌우 편차: <strong className="text-rose-500">{Math.abs(65 - (58 + Math.round((state.gaitMetrics.balanceScore - 80) * 0.5)))}cm</strong>
+                좌우 편차: <strong className="text-rose-500">{value(Math.abs(65 - (58 + Math.round((state.gaitMetrics.balanceScore - 80) * 0.5))))}cm</strong>
               </p>
             </div>
           </div>
@@ -728,13 +754,13 @@ void loop() {
                     d="M18 2.0845 a 15.9155 15.9155 0 0 1 0 31.831 a 15.9155 15.9155 0 0 1 0 -31.831"
                   />
                 </svg>
-                <div className="absolute text-[10px] font-black font-mono text-emerald-600">{similarityVal}%</div>
+                <div className="absolute text-[10px] font-black font-mono text-emerald-600">{value(similarityVal, !!pressureReceived)}%</div>
               </div>
 
               <div>
                 <span className="text-[10px] font-extrabold text-slate-700 block">정상 보행 패턴 대조</span>
                 <p className="text-[9.5px] text-slate-500 mt-0.5 leading-tight font-medium">
-                  정상 보행군 데이터베이스 대비 높은 유사도를 기록 중입니다.
+                  {live ? '—' : '정상 보행군 데이터베이스 대비 높은 유사도를 기록 중입니다.'}
                 </p>
               </div>
             </div>
@@ -873,12 +899,12 @@ void loop() {
                 <path d="M 40,172 L 100,138 L 160,88 L 240,43" fill="none" stroke="rgba(16,185,129,0.3)" strokeWidth="1.5" strokeDasharray="2,2" strokeLinecap="round" />
                 
                 {/* Translucent glass line with a soft edge and reflected highlight. */}
-                <path d="M 40,175 L 100,145 L 160,99 L 240,51" fill="none" stroke="rgba(77,65,106,0.28)" strokeWidth="5" strokeLinecap="round" strokeLinejoin="round" />
-                <path d="M 40,175 L 100,145 L 160,99 L 240,51" fill="none" stroke="url(#recovery-glass-line)" strokeWidth="3.5" strokeLinecap="round" strokeLinejoin="round" />
-                <path d="M 40,175 L 100,145 L 160,99 L 240,51" transform="translate(0 -0.8)" fill="none" stroke="rgba(255,255,255,0.7)" strokeWidth="0.8" strokeLinecap="round" strokeLinejoin="round" />
+                <path opacity={live ? 0 : 1} d="M 40,175 L 100,145 L 160,99 L 240,51" fill="none" stroke="rgba(77,65,106,0.28)" strokeWidth="5" strokeLinecap="round" strokeLinejoin="round" />
+                <path opacity={live ? 0 : 1} d="M 40,175 L 100,145 L 160,99 L 240,51" fill="none" stroke="url(#recovery-glass-line)" strokeWidth="3.5" strokeLinecap="round" strokeLinejoin="round" />
+                <path opacity={live ? 0 : 1} d="M 40,175 L 100,145 L 160,99 L 240,51" transform="translate(0 -0.8)" fill="none" stroke="rgba(255,255,255,0.7)" strokeWidth="0.8" strokeLinecap="round" strokeLinejoin="round" />
 
                 {/* Glass beads at each measurement. */}
-                <g fill="url(#recovery-glass-point)" stroke="rgba(255,255,255,0.9)" strokeWidth="1.2">
+                <g opacity={live ? 0 : 1} fill="url(#recovery-glass-point)" stroke="rgba(255,255,255,0.9)" strokeWidth="1.2">
                   <circle cx="40" cy="175" r="3.8" />
                   <circle cx="100" cy="145" r="3.8" />
                   <circle cx="160" cy="99" r="3.8" />
@@ -892,15 +918,15 @@ void loop() {
                 <text x="240" y="195" fontSize="8" fill="#94a3b8" textAnchor="middle" fontWeight="bold">4주차 (현재)</text>
 
                 {/* Point values */}
-                <text x="40" y="161" fontSize="7.5" fill="#e2e8f0" textAnchor="middle" fontWeight="black" className="font-mono">72%</text>
-                <text x="100" y="131" fontSize="7.5" fill="#e2e8f0" textAnchor="middle" fontWeight="black" className="font-mono">80%</text>
-                <text x="160" y="85" fontSize="7.5" fill="#e2e8f0" textAnchor="middle" fontWeight="black" className="font-mono">88%</text>
-                <text x="240" y="36" fontSize="8.5" fill="#818cf8" textAnchor="middle" fontWeight="black" className="font-mono">{lsiVal}%</text>
+                <text x="40" y="161" fontSize="7.5" fill="#e2e8f0" textAnchor="middle" fontWeight="black" className="font-mono">{live ? '—' : '72%'}</text>
+                <text x="100" y="131" fontSize="7.5" fill="#e2e8f0" textAnchor="middle" fontWeight="black" className="font-mono">{live ? '—' : '80%'}</text>
+                <text x="160" y="85" fontSize="7.5" fill="#e2e8f0" textAnchor="middle" fontWeight="black" className="font-mono">{live ? '—' : '88%'}</text>
+                <text x="240" y="36" fontSize="8.5" fill="#818cf8" textAnchor="middle" fontWeight="black" className="font-mono">{value(lsiVal, !!pressureReceived)}%</text>
               </svg>
 
               <div className="flex shrink-0 flex-wrap justify-between items-center gap-x-3 gap-y-1 text-[7.5px] leading-relaxed text-slate-500 border-t border-white/5 pt-2 font-mono">
                 <span>녹색 점선: 이상적 회복 선</span>
-                <span className="text-indigo-400 font-bold">● 최근 주간 +6.5% 향상</span>
+                <span className="text-indigo-400 font-bold">{live ? '—' : '● 최근 주간 +6.5% 향상'}</span>
               </div>
             </div>
           </div>
@@ -935,7 +961,7 @@ void loop() {
                     />
                   </svg>
                   <div className="absolute text-center">
-                    <span className="text-3xl font-black font-mono text-indigo-600 block">{lsiVal}%</span>
+                    <span className="text-3xl font-black font-mono text-indigo-600 block">{value(lsiVal, !!pressureReceived)}%</span>
                     <span className="text-[10px] text-slate-400 block font-bold">LSI Index</span>
                   </div>
                 </div>
@@ -944,7 +970,7 @@ void loop() {
               {/* Recovery description */}
               <div className="flex flex-col justify-center text-left">
                 <span className="text-[10px] font-extrabold text-slate-400 uppercase block font-mono">복귀 지수</span>
-                <span className="text-[12px] leading-relaxed text-emerald-600 font-bold block mt-1">✓ 평지 산책 가능</span>
+                <span className="text-[12px] leading-relaxed text-emerald-600 font-bold block mt-1">{live ? '—' : '✓ 평지 산책 가능'}</span>
                 <span className="text-[12px] leading-relaxed text-slate-500 font-medium block mt-0.5">⚠️ 러닝: 95% 이상 시 권장</span>
               </div>
             </div>
@@ -963,7 +989,7 @@ void loop() {
             <h1 className="mt-1 text-[22px] font-semibold tracking-[-.04em] text-white">운동 복귀 신호</h1>
           </div>
 
-          <RecoverySignal lsi={lsiVal} balance={state.gaitMetrics.balanceScore} />
+          <RecoverySignal lsi={lsiVal} balance={state.gaitMetrics.balanceScore} pending={!!state.telemetry && !pressureReceived} />
 
           {/* Feature 13: 운동 복귀 추천 */}
           <div className="hidden" aria-hidden="true">
@@ -981,7 +1007,7 @@ void loop() {
                 <div className="text-left">
                   <h4 className="text-xs font-black text-emerald-900">평지 가벼운 산책 (30분 이내)</h4>
                   <p className="text-[9.5px] text-emerald-800 mt-0.5 font-medium leading-tight">
-                    대칭성 {lsiVal}% 달성으로 완충화 착용 후 평지 산책이 가능합니다.
+                    대칭성 {value(lsiVal, !!pressureReceived)}% 달성으로 완충화 착용 후 평지 산책이 가능합니다.
                   </p>
                 </div>
               </div>
@@ -1071,11 +1097,12 @@ void loop() {
     case "my":
       return (
         <motion.div {...transitionConfig} className="glass screen-surface archive-screen flex h-full flex-col space-y-4 overflow-y-auto px-3 pb-24 text-slate-800" style={{ color: tokens.color.text, background: '#050507' }}>
-          {/* Product-profile hero inspired by the supplied editorial reference. */}
+          {/* Quiet abstract backdrop for the device profile. */}
           <section className="relative -mx-3 min-h-[500px] overflow-hidden rounded-b-[38px] border-b border-white/15 text-white">
-            <img src={PROFILE_IMAGE} alt="김뭉스 프로필" className="absolute inset-0 h-full w-full object-cover object-[center_24%]" />
-            <div className="absolute inset-0 bg-[linear-gradient(180deg,rgba(9,10,14,.24)_0%,rgba(18,13,10,.12)_38%,rgba(31,20,18,.84)_78%,#09090c_100%)]" aria-hidden />
-            <div className="absolute inset-0 bg-[#d8c4aa]/20 mix-blend-color" aria-hidden />
+            <div className="absolute inset-0" style={{ background: 'radial-gradient(ellipse at 18% 8%, rgba(164,199,190,.18), transparent 52%), radial-gradient(ellipse at 95% 35%, rgba(129,157,191,.12), transparent 48%), linear-gradient(160deg, #202c30 0%, #10171c 48%, #080b0f 100%)' }} aria-hidden />
+            <div className="pointer-events-none absolute -right-16 top-16 h-64 w-64 rounded-full border border-white/[.06]" aria-hidden />
+            <div className="pointer-events-none absolute -right-8 top-24 h-48 w-48 rounded-full border border-white/[.05]" aria-hidden />
+            <div className="pointer-events-none absolute left-8 top-32 h-1.5 w-1.5 rounded-full bg-[#B9F0EA]/60 shadow-[0_0_28px_8px_rgba(185,240,234,.1)]" aria-hidden />
 
             <div className="relative flex items-center justify-between px-5 pt-[max(18px,env(safe-area-inset-top))]">
               <button type="button" className="min-h-11 rounded-full border border-white/30 bg-black/15 px-4 text-[11px] font-semibold text-white backdrop-blur-xl" onClick={() => setScreenName('home')}>기기 설정</button>
@@ -1083,8 +1110,8 @@ void loop() {
             </div>
 
             <div className="absolute inset-x-0 bottom-6 flex flex-col items-center px-5 text-center">
-              <div className="h-[76px] w-[76px] overflow-hidden rounded-full border border-white/60 bg-[#d5c2a9]/40 p-1 shadow-[0_12px_30px_rgba(0,0,0,.35)] backdrop-blur-md">
-                <div className="grid h-full w-full place-items-center rounded-full bg-[radial-gradient(circle_at_30%_20%,#514039_0%,#241b19_65%,#171212_100%)] text-[#f5dfb9] shadow-[inset_0_1px_8px_rgba(255,224,182,.12)]">
+              <div className="h-[76px] w-[76px] overflow-hidden rounded-full border border-white/25 bg-white/5 p-1 shadow-[0_12px_30px_rgba(0,0,0,.35)] backdrop-blur-md">
+                <div className="grid h-full w-full place-items-center rounded-full bg-[radial-gradient(circle_at_30%_20%,#34484b_0%,#1a272d_65%,#10191f_100%)] text-[#D5ECE6] shadow-[inset_0_1px_8px_rgba(213,236,230,.12)]">
                   <svg viewBox="0 0 100 100" role="img" aria-label="MOONGS 필기체 M" className="h-full w-full p-2">
                     <path d="M15 69C24 75 29 55 35 34C38 23 32 21 25 28C20 33 20 39 25 40" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" />
                     <path d="M35 28C32 43 28 60 27 72C33 56 44 35 53 28C49 42 44 59 44 69C51 54 65 32 75 26C68 43 60 65 64 72C68 79 78 67 85 59" fill="none" stroke="currentColor" strokeWidth="3.4" strokeLinecap="round" strokeLinejoin="round" />
@@ -1101,8 +1128,8 @@ void loop() {
               </div>
               <div className="mt-5 grid w-full grid-cols-4 gap-1.5">
                 <div className="rounded-2xl border border-white/10 bg-white/10 px-1 py-2 backdrop-blur-xl"><span className="block text-[8px] text-white/65">연결</span><strong className="mt-0.5 block text-[11px]">{state.isIoTConnected ? '온라인' : '데모'}</strong></div>
-                <div className="rounded-2xl border border-white/10 bg-white/10 px-1 py-2 backdrop-blur-xl"><span className="block text-[8px] text-white/65">배터리</span><strong className="mt-0.5 block text-[11px]">{state.batteryLevel}%</strong></div>
-                <div className="rounded-2xl border border-white/10 bg-white/10 px-1 py-2 backdrop-blur-xl"><span className="block text-[8px] text-white/65">조임</span><strong className="mt-0.5 block text-[11px]">{state.tightnessIntensity}%</strong></div>
+                <div className="rounded-2xl border border-white/10 bg-white/10 px-1 py-2 backdrop-blur-xl"><span className="block text-[8px] text-white/65">배터리</span><strong className="mt-0.5 block text-[11px]">{state.telemetry && !state.telemetry.hasBattery ? '—' : `${state.batteryLevel}%`}</strong></div>
+                <div className="rounded-2xl border border-white/10 bg-white/10 px-1 py-2 backdrop-blur-xl"><span className="block text-[8px] text-white/65">조임</span><strong className="mt-0.5 block text-[11px]">{state.telemetry ? '—' : `${state.tightnessIntensity}%`}</strong></div>
                 <div className="rounded-2xl border border-white/10 bg-white/10 px-1 py-2 backdrop-blur-xl"><span className="block text-[8px] text-white/65">재활</span><strong className="mt-0.5 block text-[11px]">4주차</strong></div>
               </div>
             </div>
@@ -1182,6 +1209,7 @@ void loop() {
                 savedRecords
                   .filter(rec => {
                     if (recordsTab === "daily") return true; // Show all raw sessions
+                    if (state.telemetry) return true;
                     if (recordsTab === "weekly") return rec.id === "rec-1" || rec.id === "rec-2" || rec.id === "rec-3" || rec.id === "rec-4"; // Show summary endpoints
                     return rec.weekNumber >= 1; // Long-term shows all key week indices
                   })
@@ -1193,7 +1221,7 @@ void loop() {
                             {recordsTab === "weekly" ? `🏥 수술 제 ${rec.weekNumber}주차 종합` : `📅 ${rec.date}`}
                           </span>
                           <span className="text-[8px] text-slate-400 block mt-0.5">
-                            수술 {rec.weekNumber}주차 • 걸음수: {rec.stepCount.toLocaleString()}보
+                            {rec.pressure ? '센서 측정' : `수술 ${rec.weekNumber}주차`} • 걸음수: {rec.stepCount?.toLocaleString() ?? '—'}보
                           </span>
                         </div>
 
@@ -1211,26 +1239,27 @@ void loop() {
                         <span className={`text-[8.5px] font-bold font-mono px-1.5 py-0.5 rounded ${
                           rec.risk === "높음" ? "bg-rose-50 text-rose-700" : rec.risk === "보통" ? "bg-amber-50 text-amber-700" : "bg-emerald-50 text-emerald-700"
                         }`}>
-                          위험: {rec.risk}
+                          위험: {rec.risk ?? '—'}
                         </span>
                       </div>
 
+                      {rec.pressure && <p className="mt-2 text-[9px] text-slate-500">{rec.pressure.map((v, i) => `S${i + 1}: ${v}%`).join(' · ')}</p>}
                       <div className="grid grid-cols-4 gap-2 text-center border-t border-slate-200/60 pt-2 font-mono text-[9px] text-slate-500">
                         <div>
                           <span className="text-[7.5px] text-slate-400 block">LSI 대칭성</span>
-                          <strong className="text-indigo-600 block text-[10px]">{rec.lsi}%</strong>
+                          <strong className="text-indigo-600 block text-[10px]">{rec.lsi ?? '—'}%</strong>
                         </div>
                         <div>
                           <span className="text-[7.5px] text-slate-400 block">하중분포(L:R)</span>
-                          <strong className="text-slate-700 block text-[9px]">{rec.leftRatio}:{rec.rightRatio}</strong>
+                          <strong className="text-slate-700 block text-[9px]">{rec.leftRatio ?? '—'}:{rec.rightRatio ?? '—'}</strong>
                         </div>
                         <div>
                           <span className="text-[7.5px] text-slate-400 block">보행속도</span>
-                          <strong className="text-indigo-650 block text-[10px]">{rec.speed.toFixed(2)} m/s</strong>
+                          <strong className="text-indigo-650 block text-[10px]">{rec.speed?.toFixed(2) ?? '—'} m/s</strong>
                         </div>
                         <div>
                           <span className="text-[7.5px] text-slate-400 block">보폭 (L:R)</span>
-                          <strong className="text-slate-700 block text-[9px]">{rec.leftStepCm}:{rec.rightStepCm}</strong>
+                          <strong className="text-slate-700 block text-[9px]">{rec.leftStepCm ?? '—'}:{rec.rightStepCm ?? '—'}</strong>
                         </div>
                       </div>
                     </div>

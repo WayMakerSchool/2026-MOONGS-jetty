@@ -6,3 +6,6 @@ coverage/
 *.log
 .env*
 !.env.example
+
+# Local flash dumps (may contain NVS data such as Wi-Fi credentials)
+firmware/backup/

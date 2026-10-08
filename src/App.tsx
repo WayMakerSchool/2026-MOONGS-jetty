@@ -26,6 +26,10 @@ import { motion, AnimatePresence } from "motion/react";
 import { AppState, ChatMessage, FootSensorData } from "./types";
 import SmartCastScreen from "./components/SmartCastScreen";
 import HomeV2 from "./components/HomeV2";
+import { applySensorLine, beginLiveSession } from "./lib/telemetry";
+import { SensorTextBuffer } from "./lib/sensorStream";
+import { defaultBaudRate, openSerialPort, serialTextDiagnostic } from "./lib/serial";
+import { sensorServices, subscribeSensor, bluetoothError, forgetSensorDevices } from "./lib/bluetooth";
 import BottomNavigation from "./components/ui/BottomNavigation";
 
 const GEN_BOOT_IMAGE_PATH = "/src/assets/images/moongs_smart_boot_1779337373219.png";
@@ -33,6 +37,10 @@ const heatLabels = ["OFF", "38°C", "41°C", "45°C"];
 
 export default function App() {
   const bluetoothDeviceRef = useRef<any>(null);
+  const bluetoothCleanupRef = useRef<(() => void) | null>(null);
+  const bluetoothConnectingRef = useRef(false);
+  const bluetoothAttemptRef = useRef(0);
+  const [bluetoothStatus, setBluetoothStatus] = useState("");
   
   // Web Serial API state & refs
   const [isSerialConnected, setIsSerialConnected] = useState<boolean>(false);
@@ -41,7 +49,17 @@ export default function App() {
   const serialPortRef = useRef<any>(null);
   const serialReaderRef = useRef<any>(null);
   const serialKeepReadingRef = useRef<boolean>(true);
-  const lastUpdateTimeRef = useRef<number>(0);
+  const serialReadTaskRef = useRef<Promise<void> | null>(null);
+  const [serialBaudRate, setSerialBaudRate] = useState(() => {
+    const saved = Number(localStorage.getItem('moongs_serial_baud'));
+    return [9600, 19200, 38400, 57600, 115200, 230400].includes(saved) ? saved : defaultBaudRate;
+  });
+  const [serialDiagnostic, setSerialDiagnostic] = useState("");
+  const serialModeRef = useRef<'usb' | 'bluetooth'>('usb');
+  const changeSerialBaudRate = (rate: number) => {
+    setSerialBaudRate(rate);
+    localStorage.setItem('moongs_serial_baud', String(rate));
+  };
 
   const [viewMode, setViewMode] = useState<"simulator" | "grid">("simulator");
   const [activeScreen, setActiveScreen] = useState<string>("home");
@@ -51,6 +69,7 @@ export default function App() {
     tightnessIntensity: 70,
     isSimulatingWalking: false,
     isIoTConnected: false,
+        telemetry: undefined,
     batteryLevel: 87,
     sensorData: {
       leftFoot: { forefoot: 35, midfoot: 42, heel: 38, piezo1: 35, piezo2: 38, piezo3: 40, piezo4: 38, status: "normal" },
@@ -105,6 +124,12 @@ export default function App() {
     scannedDevices: []
   });
 
+  useEffect(() => {
+    if (!isSerialConnected || !state.telemetry?.received) return;
+    if (state.telemetry.hasPressure) setSerialDiagnostic('압력 센서 데이터 수신 중');
+    else if (state.imuData) setSerialDiagnostic('IMU 데이터 수신 중 · 압력 센서 데이터는 아직 없습니다.');
+  }, [isSerialConnected, state.telemetry?.received, state.telemetry?.hasPressure, state.imuData]);
+
   const [chatInput, setChatInput] = useState("");
   const [chatMessages, setChatMessages] = useState<ChatMessage[]>([
     { 
@@ -114,6 +139,9 @@ export default function App() {
     }
   ]);
   const [isAiLoading, setIsAiLoading] = useState(false);
+  useEffect(() => {
+    if (state.telemetry) setChatMessages([{ role: "model", text: "기기가 연결되었습니다. 수신한 압력 데이터를 기준으로 안내합니다. 보행 대칭성과 운동 복귀 상태는 추가 측정이 필요합니다.", timestamp: "현재" }]);
+  }, [!!state.telemetry]);
   const [heatTherapy, setHeatTherapy] = useState<number>(2); 
   const [muscleStim, setMuscleStim] = useState<boolean>(false);
   const [stimIntensity, setStimIntensity] = useState<number>(40);
@@ -121,7 +149,7 @@ export default function App() {
   // walking physics loop
   useEffect(() => {
     let interval: any = null;
-    if (state.isSimulatingWalking) {
+    if (state.isSimulatingWalking && !state.telemetry) {
       interval = setInterval(() => {
         setState(prev => {
           const nextSteps = prev.gaitMetrics.stepCount + Math.floor(Math.random() * 3) + 1;
@@ -196,7 +224,7 @@ export default function App() {
       if (interval) clearInterval(interval);
     }
     return () => clearInterval(interval);
-  }, [state.isSimulatingWalking]);
+  }, [state.isSimulatingWalking, state.telemetry]);
 
   const handleTightnessChange = (value: number) => {
     setState(prev => {
@@ -246,212 +274,91 @@ export default function App() {
     });
   };
 
-  const startBluetoothScan = () => {
-    setState(prev => ({
-      ...prev,
-      isBluetoothScanning: true,
-      scannedDevices: []
-    }));
-
-    const isBleSupported = typeof navigator !== "undefined" && (navigator as any).bluetooth;
-
-    if (isBleSupported) {
-      setState(prev => {
-        let newLogs = [...prev.notifications];
-        newLogs.unshift({
-          id: `ble-info-${Date.now()}`,
-          timestamp: "방금 전",
-          title: "📡 브라우저 블루투스 연동 활성화",
-          message: "브라우저의 실제 스마트 기기 탐색 창이 열렸습니다. 연결할 스마트 깁스 또는 건강 측정 BLE 하드웨어를 선택해 주세요.",
-          type: "info"
-        });
-        return { ...prev, notifications: newLogs.slice(0, 5) };
-      });
-
-      (navigator as any).bluetooth.requestDevice({
-        acceptAllDevices: true,
-        optionalServices: [
-          'battery_service',
-          'device_information',
-          '0000ffe0-0000-1000-8000-00805f9b34fb',
-          '0000180d-0000-1000-8000-00805f9b34fb'
-        ]
-      })
-      .then((device: any) => {
-        bluetoothDeviceRef.current = device;
-        
-        device.addEventListener('gattserverdisconnected', () => {
-          setState(prev => {
-            let newLogs = [...prev.notifications];
-            newLogs.unshift({
-              id: `ble-disc-${Date.now()}`,
-              timestamp: "방금 전",
-              title: "⚪ 블루투스 연결 해제됨",
-              message: `'${device.name || "Bluetooth 장치"}'와의 통신 연결이 중단되었습니다.`,
-              type: "warning"
-            });
-            return {
-              ...prev,
-              isIoTConnected: false,
-              bluetoothDeviceName: undefined,
-              notifications: newLogs.slice(0, 5)
-            };
-          });
-        });
-
-        setState(prev => {
-          let newLogs = [...prev.notifications];
-          newLogs.unshift({
-            id: `ble-conn-${Date.now()}`,
-            timestamp: "방금 전",
-            title: "🔵 GATT 서버 연결 수립 중...",
-            message: `'${device.name || "스마트 하드웨어"}' 장비의 GATT 서버 인스턴스 전진 연결을 전개합니다.`,
-            type: "info"
-          });
-          return { ...prev, notifications: newLogs.slice(0, 5) };
-        });
-
-        return device.gatt.connect();
-      })
-      .then((server: any) => {
-        // Try to get primary service for Serial-over-BLE (FFE0/FFE1) and run characteristic listener
-        server.getPrimaryService('0000ffe0-0000-1000-8000-00805f9b34fb')
-          .then((service: any) => service.getCharacteristic('0000ffe1-0000-1000-8000-00805f9b34fb'))
-          .then((characteristic: any) => {
-            characteristic.startNotifications();
-            let bleAccumulator = "";
-            characteristic.addEventListener('characteristicvaluechanged', (event: any) => {
-              const value = event.target.value;
-              const decoder = new TextDecoder();
-              const chunk = decoder.decode(value);
-              setLatestRawSerialData(chunk.trim() + " (BLE)");
-              
-              bleAccumulator += chunk;
-              const lines = bleAccumulator.split(/\r?\n/);
-              bleAccumulator = lines.pop() || "";
-              
-              for (const line of lines) {
-                const trimmed = line.trim();
-                if (trimmed) {
-                  parseAndApplySensorLine(trimmed, "Bluetooth");
-                }
-              }
-            });
-          })
-          .catch((e: any) => {
-            console.log("FFE0/FFE1 BLE Serial service is not available or bypassed on this device:", e);
-          });
-
-        return server.getPrimaryService('battery_service')
-          .then((service: any) => service.getCharacteristic('battery_level'))
-          .then((characteristic: any) => {
-            characteristic.startNotifications();
-            characteristic.addEventListener('characteristicvaluechanged', (event: any) => {
-              const val = event.target.value.getUint8(0);
-              setState(prev => ({ ...prev, batteryLevel: val }));
-            });
-            return characteristic.readValue();
-          })
-          .then((value: any) => {
-            const batteryVal = value.getUint8(0);
-            setState(prev => ({ ...prev, batteryLevel: batteryVal }));
-          })
-          .catch((e: any) => {
-            console.log("Battery service read bypassed or unsupported on this BLE device:", e);
-          })
-          .then(() => {
-            setState(prev => {
-              let newLogs = [...prev.notifications];
-              newLogs.unshift({
-                id: `ble-success-${Date.now()}`,
-                timestamp: "방금 전",
-                title: "🟢 실제 블루투스 연결 수립 완료!",
-                message: `기기 '${bluetoothDeviceRef.current?.name || "Moongs-Cast-Real"}'와 실제 물리 무선 채널 세션이 바인딩되었습니다.`,
-                type: "success"
-              });
-              return {
-                ...prev,
-                isIoTConnected: true,
-                isBluetoothScanning: false,
-                bluetoothDeviceName: bluetoothDeviceRef.current?.name || "MOONGS-Cast-Real",
-                notifications: newLogs.slice(0, 5)
-              };
-            });
-          });
-      })
-      .catch((err: any) => {
-        console.warn("Web Bluetooth error or pairing cancelled:", err);
-        
-        setState(prev => {
-          let newLogs = [...prev.notifications];
-          newLogs.unshift({
-            id: `ble-err-${Date.now()}`,
-            timestamp: "방금 전",
-            title: "⚠️ 블루투스 검색 제한/취소됨",
-            message: `물리 환경 무선 수색 대기 중: ${err.message || "사용자 취소 또는 브라우저 제한"}. 대신 예비 장치 목록에서 선택하세요!`,
-            type: "warning"
-          });
-          return { ...prev, notifications: newLogs.slice(0, 5) };
-        });
-      });
-    }
-
-    setTimeout(() => {
-      setState(prev => {
-        if (!prev.isBluetoothScanning) return prev;
-        const testDevices = [
-          { name: "[실제 BLE 검색 재시도] 스마트폰/PC 무선 검색창 띄우기", rssi: -30, address: "PHYSICAL:BLE:REQUEST" },
-          { name: "MOONGS-Cast-04F (테스트 에뮬레이터)", rssi: -45, address: "EMULATOR:01" },
-          { name: "MOONGS-AirBoot-X (테스트 에뮬레이터)", rssi: -62, address: "EMULATOR:02" },
-          { name: "MediCast-Sensor-V3", rssi: -89, address: "EMULATOR:03" }
-        ];
-        
-        let newLogs = [...prev.notifications];
-        newLogs.unshift({
-          id: `ble-scan-${Date.now()}`,
-          timestamp: "방금 전",
-          title: "📡 장치 수색 완료",
-          message: `주변 무선 대역 수색 결과 총 ${testDevices.length}개의 정형계 하드웨어 타겟이 식별되었습니다.`,
-          type: "info"
-        });
-
-        return {
-          ...prev,
-          isBluetoothScanning: false,
-          scannedDevices: testDevices,
-          notifications: newLogs.slice(0, 5)
-        };
-      });
-    }, 1800);
-  };
-
-  const connectBluetoothDevice = (deviceName: string) => {
-    if (deviceName.includes("PHYSICAL:BLE:REQUEST") || deviceName.includes("물리 무선") || deviceName.includes("실제 BLE 경고")) {
-      startBluetoothScan();
+  const startBluetoothScan = async () => {
+    if (bluetoothConnectingRef.current) return;
+    setSerialError(null);
+    if (!(navigator as any).bluetooth) {
+      setSerialError("이 브라우저에서 블루투스 연결을 지원하지 않습니다. Chrome 또는 Edge에서 앱을 열어 주세요.");
       return;
     }
-
-    setState(prev => {
-      let newLogs = [...prev.notifications];
-      newLogs.unshift({
-        id: `pairing-${Date.now()}`,
-        timestamp: "방금 전",
-        title: "🔵 무선 페어링 활성화",
-        message: `'${deviceName}' 의료 동기화 및 온도 제어 패킷 채널 세션이 수립되었습니다.`,
-        type: "success"
+    bluetoothConnectingRef.current = true;
+    const attempt = ++bluetoothAttemptRef.current;
+    const current = () => attempt === bluetoothAttemptRef.current;
+    let stage = "기기 선택";
+    setBluetoothStatus(stage);
+    setState(prev => ({ ...prev, isBluetoothScanning: true, scannedDevices: [] }));
+    let device: any;
+    try {
+      // Keep requestDevice directly inside the user's click activation.
+      device = await (navigator as any).bluetooth.requestDevice({
+        acceptAllDevices: true,
+        optionalServices: [...sensorServices, 'battery_service', 'device_information']
       });
-
-      return {
-        ...prev,
-        isIoTConnected: true,
-        bluetoothDeviceName: deviceName,
-        batteryLevel: 98,
-        notifications: newLogs.slice(0, 5)
-      };
-    });
+      if (!current()) return;
+      if (serialPortRef.current) await disconnectSerial();
+      if (!current()) return;
+      bluetoothCleanupRef.current?.();
+      const previous = bluetoothDeviceRef.current;
+      bluetoothDeviceRef.current = device;
+      if (previous && previous !== device && previous.gatt?.connected) previous.gatt.disconnect();
+      device.addEventListener('gattserverdisconnected', () => {
+        if (!current() || bluetoothDeviceRef.current !== device) return;
+        bluetoothCleanupRef.current?.();
+        bluetoothCleanupRef.current = null;
+        setBluetoothStatus("연결 해제됨");
+        setState(prev => ({ ...prev, isIoTConnected: false, bluetoothDeviceName: undefined }));
+      }, { once: true });
+      if (!device.gatt) throw new Error("BLE 데이터 연결을 지원하지 않는 기기입니다.");
+      stage = "기기에 연결 중";
+      setBluetoothStatus(`${device.name || '센서'} · ${stage}`);
+      const server = device.gatt.connected ? device.gatt : await device.gatt.connect();
+      if (!current()) { server.disconnect(); return; }
+      setLatestRawSerialData("");
+      setState(prev => ({ ...beginLiveSession(prev), isIoTConnected: false, bluetoothDeviceName: device.name }));
+      stage = "센서 수신 설정";
+      setBluetoothStatus(stage);
+      const cleanup = await subscribeSensor(server,
+        chunk => { if (current()) setLatestRawSerialData(chunk.trim() + " (BLE)"); },
+        line => { if (current()) parseAndApplySensorLine(line, "Bluetooth"); });
+      if (!current()) { cleanup(); server.disconnect(); return; }
+      bluetoothCleanupRef.current = cleanup;
+      if (!server.connected) throw new Error("센서 설정 중 연결이 해제되었습니다.");
+      setState(prev => ({ ...prev, isIoTConnected: true, bluetoothDeviceName: device.name || "MOONGS 센서" }));
+      setBluetoothStatus("센서 연결 완료 · 데이터 수신 대기");
+      // Battery is optional and cannot block sensor connection success.
+      try {
+        const service = await server.getPrimaryService('battery_service');
+        const characteristic = await service.getCharacteristic('battery_level');
+        const battery = (await characteristic.readValue()).getUint8(0);
+        if (!current()) return;
+        setState(prev => ({ ...prev, batteryLevel: battery, telemetry: { ...prev.telemetry!, hasBattery: true } }));
+      } catch { /* The prototype may not implement a battery service. */ }
+    } catch (error) {
+      if (!current()) return;
+      const message = bluetoothError(error, stage);
+      setSerialError(message);
+      setBluetoothStatus("연결 실패");
+      bluetoothCleanupRef.current?.();
+      bluetoothCleanupRef.current = null;
+      if (bluetoothDeviceRef.current === device) bluetoothDeviceRef.current = null;
+      if (device?.gatt?.connected) device.gatt.disconnect();
+      setState(prev => ({ ...prev, isIoTConnected: !!serialPortRef.current, bluetoothDeviceName: serialPortRef.current ? prev.bluetoothDeviceName : undefined }));
+    } finally {
+      if (current()) {
+        bluetoothConnectingRef.current = false;
+        setState(prev => ({ ...prev, isBluetoothScanning: false, scannedDevices: [] }));
+      }
+    }
   };
 
+  const connectBluetoothDevice = () => { void startBluetoothScan(); };
+
   const disconnectBluetooth = () => {
+    bluetoothAttemptRef.current++;
+    bluetoothConnectingRef.current = false;
+    bluetoothCleanupRef.current?.();
+    bluetoothCleanupRef.current = null;
+    setBluetoothStatus("");
     if (bluetoothDeviceRef.current) {
       try {
         if (bluetoothDeviceRef.current.gatt && bluetoothDeviceRef.current.gatt.connected) {
@@ -476,49 +383,84 @@ export default function App() {
       return {
         ...prev,
         isIoTConnected: false,
+        telemetry: undefined,
         bluetoothDeviceName: undefined,
         notifications: newLogs.slice(0, 5)
       };
     });
   };
 
-  // --- Web Serial API (Wired Cable Link with Arduino Uno) handlers ---
-  const connectSerial = async () => {
+  const resetBluetooth = async () => {
+    bluetoothAttemptRef.current++;
+    bluetoothConnectingRef.current = false;
+    bluetoothCleanupRef.current?.();
+    bluetoothCleanupRef.current = null;
+    const device = bluetoothDeviceRef.current;
+    bluetoothDeviceRef.current = null;
+    if (device?.gatt?.connected) device.gatt.disconnect();
+    if (serialPortRef.current && serialModeRef.current === 'bluetooth') await disconnectSerial();
     setSerialError(null);
-    if (typeof navigator === "undefined" || !("serial" in navigator)) {
-      setSerialError("브라우저가 Web Serial API를 지원하지 않거나 보안상 차단되었습니다. 우측 상단의 '새 창으로 열기' 버튼을 클릭해 새 탭에서 열어주세요!");
+    setBluetoothStatus('앱 연결 초기화 완료 · 브라우저 기기 권한 삭제 중');
+    try {
+      const result = await forgetSensorDevices((navigator as any).bluetooth, device);
+      if (result.manual || !result.supported) {
+        setBluetoothStatus('앱 연결 초기화 완료 · 저장된 권한은 Chrome 사이트 설정에서 MOONGS 기기를 삭제해 주세요.');
+      } else if (result.forgotten) {
+        setBluetoothStatus('앱 연결과 MOONGS 기기 접근 권한 삭제 완료 · 다시 기기를 선택해 주세요.');
+      } else {
+        setBluetoothStatus('앱 연결 초기화 완료 · 삭제할 브라우저 기기 권한이 없습니다. 운영체제 페어링은 Mac 블루투스 설정에서 삭제해 주세요.');
+      }
+    } catch {
+      setBluetoothStatus('앱 연결 초기화 완료 · 브라우저 권한 삭제 실패: Chrome 사이트 설정에서 MOONGS 기기를 삭제해 주세요.');
+    }
+    if (!serialPortRef.current) {
+      setLatestRawSerialData('');
+      setState(prev => ({ ...beginLiveSession(prev), isIoTConnected: false, bluetoothDeviceName: undefined,
+        isBluetoothScanning: false, scannedDevices: [] }));
+    } else {
+      setState(prev => ({ ...prev, isBluetoothScanning: false, scannedDevices: [] }));
+    }
+  };
+
+  const startSerialPort = async (port: any, mode: 'usb' | 'bluetooth') => {
+    await openSerialPort(port, serialBaudRate);
+    serialPortRef.current = port;
+    serialModeRef.current = mode;
+    serialKeepReadingRef.current = true;
+    setIsSerialConnected(true);
+    setLatestRawSerialData("");
+    setSerialDiagnostic(`${serialBaudRate} baud · 포트 연결 완료, 센서 데이터 수신 대기`);
+    setBluetoothStatus("");
+    setState(prev => ({ ...beginLiveSession(prev), isIoTConnected: true,
+      bluetoothDeviceName: mode === 'bluetooth' ? 'Bluetooth Serial' : 'USB Serial' }));
+    serialReadTaskRef.current = readSerialLoop(port);
+  };
+
+  const connectSerial = async (mode: 'usb' | 'bluetooth' = 'usb') => {
+    setSerialError(null);
+    if (!('serial' in navigator)) {
+      setSerialError("이 브라우저는 시리얼 연결을 지원하지 않습니다. 데스크톱 Chrome에서 열어 주세요.");
       return;
     }
-
     try {
       const port = await (navigator as any).serial.requestPort();
-      serialPortRef.current = port;
-      await port.open({ baudRate: 9600 });
-      setIsSerialConnected(true);
-      serialKeepReadingRef.current = true;
-
-      setState(prev => {
-        let newLogs = [...prev.notifications];
-        newLogs.unshift({
-          id: `serial-conn-${Date.now()}`,
-          timestamp: "방금 전",
-          title: "🔌 아두이노 유선 연결 성공!",
-          message: "USB 시리얼 포트를 통해 아두이노 우노와 유선 연동을 수립했습니다. 실시간 발바닥 하중 센서 수신을 개시합니다.",
-          type: "success"
-        });
-        return {
-          ...prev,
-          isIoTConnected: true,
-          bluetoothDeviceName: "Arduino Uno (USB Serial)",
-          notifications: newLogs.slice(0, 5)
-        };
-      });
-
-      readSerialLoop(port);
+      if (serialPortRef.current) await disconnectSerial();
+      if (bluetoothDeviceRef.current?.gatt?.connected) disconnectBluetooth();
+      await startSerialPort(port, mode);
     } catch (err: any) {
-      console.error("Serial port opening error:", err);
-      setSerialError(err.message || "시리얼 포트를 열지 못했습니다. 장치 연결 상태 및 권한을 확인하고 새 탭(공유 링크)에서 다시 시도해 주세요.");
+      setSerialError(err.name === 'NotFoundError' ? '포트를 선택하지 않았습니다. 일반 블루투스 시리얼 기기는 운영체제에서 먼저 페어링하고 포트 목록에서 선택해 주세요.' : `시리얼 연결 실패: ${err.message || err}`);
     }
+  };
+
+  const reconnectSerial = async () => {
+    const port = serialPortRef.current;
+    const mode = serialModeRef.current;
+    if (!port) return;
+    setSerialError(null);
+    try {
+      await disconnectSerial();
+      await startSerialPort(port, mode);
+    } catch (err: any) { setSerialError(`재연결 실패: ${err.message || err}`); }
   };
 
   const disconnectSerial = async () => {
@@ -530,6 +472,8 @@ export default function App() {
         console.warn(e);
       }
     }
+    await serialReadTaskRef.current?.catch(() => {});
+    serialReadTaskRef.current = null;
     if (serialPortRef.current) {
       try {
         await serialPortRef.current.close();
@@ -539,6 +483,7 @@ export default function App() {
       serialPortRef.current = null;
     }
     setIsSerialConnected(false);
+    setSerialDiagnostic("");
     setLatestRawSerialData("");
 
     setState(prev => {
@@ -553,255 +498,49 @@ export default function App() {
       return {
         ...prev,
         isIoTConnected: false,
+        telemetry: undefined,
         bluetoothDeviceName: undefined,
         notifications: newLogs.slice(0, 5)
       };
     });
   };
 
-  // --- Common Sensor Data Parser with Ultra-Fast 50ms Throttling ---
   const parseAndApplySensorLine = (line: string, source: "Serial" | "Bluetooth") => {
-    if (!line || !line.trim()) return;
-    const trimmed = line.trim();
-
-    // 50ms 스로틀링: 실시간 압력 변화를 0.05초 만에 연동하여 사용자 터치 및 압전소자 변화를 즉각 반영
-    const now = Date.now();
-    if (now - lastUpdateTimeRef.current < 50) {
-      return;
-    }
-    lastUpdateTimeRef.current = now;
-
-    // 1) Key-Value 포맷 처리 (예: "F:45, M:30, H:85" 또는 "RF:45, RM:30, RH:85" 또는 "P:45,30,85")
-    let extractedFore: number | null = null;
-    let extractedMid: number | null = null;
-    let extractedHeel: number | null = null;
-
-    if (trimmed.includes(":") || trimmed.toUpperCase().includes("F") || trimmed.toUpperCase().includes("H")) {
-      const kvPairs = trimmed.split(/[,;\s]+/);
-      for (const pair of kvPairs) {
-        const [k, v] = pair.split(":").map(s => s.trim().toUpperCase());
-        const numVal = parseFloat(v || k);
-        if (!isNaN(numVal)) {
-          if (k === "F" || k === "RF" || k === "FORE") extractedFore = numVal;
-          if (k === "M" || k === "RM" || k === "MID") extractedMid = numVal;
-          if (k === "H" || k === "RH" || k === "HEEL") extractedHeel = numVal;
-        }
-      }
-    }
-
-    const parts = trimmed.split(",").map(p => parseFloat(p.trim())).filter(p => !isNaN(p));
-
-    setState(prev => {
-      let leftFore = prev.sensorData.leftFoot.forefoot;
-      let leftMid = prev.sensorData.leftFoot.midfoot;
-      let leftHeel = prev.sensorData.leftFoot.heel;
-      let rightFore = prev.sensorData.rightFoot.forefoot;
-      let rightMid = prev.sensorData.rightFoot.midfoot;
-      let rightHeel = prev.sensorData.rightFoot.heel;
-      let stepCount = prev.gaitMetrics.stepCount;
-
-      let minX = parts.length >= 5 ? parts[4] : 0;
-      let maxX = parts.length >= 6 ? parts[5] : 0;
-      let minY = parts.length >= 7 ? parts[6] : 0;
-      let maxY = parts.length >= 8 ? parts[7] : 0;
-
-      const scaleVal = (v: number) => {
-        if (v > 100) {
-          return Math.min(Math.round((v / 1023) * 100), 100);
-        }
-        return Math.min(Math.max(Math.round(v), 0), 100);
-      };
-
-      let rPiezo1 = prev.sensorData.rightFoot.piezo1 ?? prev.sensorData.rightFoot.forefoot;
-      let rPiezo2 = prev.sensorData.rightFoot.piezo2 ?? prev.sensorData.rightFoot.forefoot;
-      let rPiezo3 = prev.sensorData.rightFoot.piezo3 ?? prev.sensorData.rightFoot.heel;
-      let rPiezo4 = prev.sensorData.rightFoot.piezo4 ?? prev.sensorData.rightFoot.heel;
-
-      if (extractedFore !== null || extractedMid !== null || extractedHeel !== null) {
-        if (extractedFore !== null) { rightFore = scaleVal(extractedFore); rPiezo1 = rightFore; rPiezo2 = rightFore; }
-        if (extractedMid !== null) rightMid = scaleVal(extractedMid);
-        if (extractedHeel !== null) { rightHeel = scaleVal(extractedHeel); rPiezo3 = rightHeel; rPiezo4 = rightHeel; }
-      } else if (parts.length >= 7) {
-        const p1 = scaleVal(parts[0]);
-        const p2 = scaleVal(parts[1]);
-        const p3 = scaleVal(parts[2]);
-        const p4 = scaleVal(parts[3]);
-        
-        rPiezo1 = p1;
-        rPiezo2 = p2;
-        rPiezo3 = p3;
-        rPiezo4 = p4;
-
-        rightFore = Math.round((p1 + p2) / 2);
-        rightMid = Math.round((p1 + p2 + p3 + p4) / 4);
-        rightHeel = Math.round((p3 + p4) / 2);
-
-        const rightTotal = rightFore + rightMid + rightHeel;
-        if (rightTotal > 10) {
-          leftFore = Math.min(Math.max(100 - rightFore, 35), 65);
-          leftMid = Math.min(Math.max(100 - rightMid, 40), 60);
-          leftHeel = Math.min(Math.max(100 - rightHeel, 30), 55);
-        }
-      } else if (parts.length >= 6) {
-        leftFore = scaleVal(parts[0]);
-        leftMid = scaleVal(parts[1]);
-        leftHeel = scaleVal(parts[2]);
-        rightFore = scaleVal(parts[3]);
-        rightMid = scaleVal(parts[4]);
-        rightHeel = scaleVal(parts[5]);
-        rPiezo1 = rightFore;
-        rPiezo2 = rightFore;
-        rPiezo3 = rightHeel;
-        rPiezo4 = rightHeel;
-        if (parts.length >= 7) {
-          stepCount = Math.round(parts[6]);
-        }
-      } else if (parts.length === 4) {
-        // 4채널 압전소자 센서 전용 매핑 (센서1: 앞발L, 센서2: 앞발R, 센서3: 뒤꿈치L, 센서4: 뒤꿈치R)
-        rPiezo1 = scaleVal(parts[0]);
-        rPiezo2 = scaleVal(parts[1]);
-        rPiezo3 = scaleVal(parts[2]);
-        rPiezo4 = scaleVal(parts[3]);
-        
-        rightFore = Math.round((rPiezo1 + rPiezo2) / 2);
-        rightMid = Math.round((rPiezo1 + rPiezo2 + rPiezo3 + rPiezo4) / 4);
-        rightHeel = Math.round((rPiezo3 + rPiezo4) / 2);
-
-        const rightTotal = rightFore + rightMid + rightHeel;
-        if (rightTotal > 10) {
-          leftFore = Math.min(Math.max(100 - rightFore, 35), 65);
-          leftMid = Math.min(Math.max(100 - rightMid, 40), 60);
-          leftHeel = Math.min(Math.max(100 - rightHeel, 30), 55);
-        }
-      } else if (parts.length === 3) {
-        rightFore = scaleVal(parts[0]);
-        rightMid = scaleVal(parts[1]);
-        rightHeel = scaleVal(parts[2]);
-        rPiezo1 = rightFore;
-        rPiezo2 = rightFore;
-        rPiezo3 = rightHeel;
-        rPiezo4 = rightHeel;
-      } else if (parts.length === 2) {
-        leftHeel = scaleVal(parts[0]);
-        rightHeel = scaleVal(parts[1]);
-        rPiezo3 = rightHeel;
-        rPiezo4 = rightHeel;
-      } else if (parts.length === 1) {
-        rightHeel = scaleVal(parts[0]);
-        rPiezo3 = rightHeel;
-        rPiezo4 = rightHeel;
-      }
-
-        // 오른발 뒤꿈치 접지(Heel Strike) 변화에 근거한 걸음수 계산
-        let addedStep = false;
-        if (rightHeel > 65 && prev.sensorData.rightFoot.heel <= 65) {
-          addedStep = true;
-        }
-
-        const finalStepCount = addedStep ? stepCount + 1 : stepCount;
-        const finalDistance = parseFloat((prev.gaitMetrics.distanceKm + (addedStep ? 0.001 : 0)).toFixed(3));
-
-        const leftTotal = leftFore + leftMid + leftHeel;
-        const rightTotal = rightFore + rightMid + rightHeel;
-        const totalPressure = leftTotal + rightTotal;
-
-        let leftWeight = prev.gaitMetrics.weightDistributionLeft;
-        let rightWeight = prev.gaitMetrics.weightDistributionRight;
-        if (totalPressure > 10) {
-          leftWeight = Math.round((leftTotal / totalPressure) * 100);
-          rightWeight = 100 - leftWeight;
-        }
-
-        const balanceScore = leftWeight === 50 ? 98 : Math.max(98 - Math.abs(50 - leftWeight) * 3, 60);
-        const lsiSymmetry = Math.min(Math.max(Math.round(balanceScore - 1), 60), 98);
-        const gaitSimilarity = Math.min(Math.max(Math.round(balanceScore - 3), 58), 96);
-
-        let newNotifications = [...prev.notifications];
-        if (rightHeel > 80 && prev.sensorData.rightFoot.heel <= 80) {
-          newNotifications.unshift({
-            id: `serial-warn-${Date.now()}`,
-            timestamp: "방금 전",
-            title: `🚨 ${source} 압력 한계 임계값 초과`,
-            message: `스마트 깁스 실시간 감지 압력(${rightHeel}%)이 부상 회복 안전 기준(80%)을 침범했습니다. 발을 조금 더 디디거나 좌측 정상발로 이동 분산을 권장합니다!`,
-            type: "danger"
-          });
-          newNotifications = newNotifications.slice(0, 5);
-        }
-
-        return {
-          ...prev,
-          sensorData: {
-            leftFoot: { forefoot: leftFore, midfoot: leftMid, heel: leftHeel, status: leftHeel > 80 ? "warning" : "normal" },
-            rightFoot: {
-              forefoot: rightFore,
-              midfoot: rightMid,
-              heel: rightHeel,
-              piezo1: rPiezo1,
-              piezo2: rPiezo2,
-              piezo3: rPiezo3,
-              piezo4: rPiezo4,
-              status: rightHeel > 80 || rPiezo4 > 80 || rPiezo3 > 80 ? "danger" : rightHeel > 70 ? "warning" : "normal"
-            }
-          },
-          gaitMetrics: {
-            ...prev.gaitMetrics,
-            stepCount: finalStepCount,
-            distanceKm: finalDistance,
-            weightDistributionLeft: leftWeight,
-            weightDistributionRight: rightWeight,
-            balanceScore: Math.round(balanceScore),
-            lsiSymmetry,
-            gaitSimilarity
-          },
-          arduinoData: parts.length >= 7 ? {
-            piezo1: parts[0],
-            piezo2: parts[1],
-            piezo3: parts[2],
-            piezo4: parts[3],
-            minX,
-            maxX,
-            minY,
-            maxY,
-            updatedAt: new Date().toLocaleTimeString("ko-KR", { hour12: false })
-          } : prev.arduinoData,
-          notifications: newNotifications
-        };
-      });
+    setState(prev => applySensorLine(prev, line, source));
   };
 
   const readSerialLoop = async (port: any) => {
-    while (port.readable && serialKeepReadingRef.current) {
-      try {
-        const textDecoder = new TextDecoderStream();
-        const readableStreamClosed = port.readable.pipeTo(textDecoder.writable);
-        const reader = textDecoder.readable.getReader();
-        serialReaderRef.current = reader;
-
-        let accumulator = "";
-
-        while (serialKeepReadingRef.current) {
-          const { value, done } = await reader.read();
-          if (done) break;
-          if (value) {
-            setLatestRawSerialData(value.trim());
-            accumulator += value;
-            const lines = accumulator.split(/\r?\n/);
-            accumulator = lines.pop() || "";
-
-            for (const line of lines) {
-              const trimmed = line.trim();
-              if (trimmed) {
-                parseAndApplySensorLine(trimmed, "Serial");
-              }
-            }
-          }
-        }
-
-        reader.releaseLock();
-        await readableStreamClosed.catch(() => {});
-      } catch (err) {
-        console.error("Serial stream read error:", err);
-        await new Promise(resolve => setTimeout(resolve, 1000));
+    const reader = port.readable.getReader();
+    serialReaderRef.current = reader;
+    const decoder = new TextDecoder();
+    const buffer = new SensorTextBuffer(line => parseAndApplySensorLine(line, "Serial"));
+    let flushTimer: ReturnType<typeof setTimeout>;
+    try {
+      while (serialKeepReadingRef.current) {
+        const { value, done } = await reader.read();
+        if (done) break;
+        const chunk = decoder.decode(value, { stream: true });
+        setLatestRawSerialData(prev => (prev + chunk).slice(-600));
+        const diagnostic = serialTextDiagnostic(chunk);
+        if (diagnostic) setSerialDiagnostic(diagnostic);
+        clearTimeout(flushTimer);
+        buffer.push(chunk);
+        flushTimer = setTimeout(() => buffer.flush(), 120);
+      }
+      if (serialKeepReadingRef.current) {
+        buffer.push(decoder.decode());
+        buffer.flush();
+      }
+    } catch (err: any) {
+      if (serialKeepReadingRef.current) setSerialError(`USB 센서 수신 실패: ${err.message || err}`);
+    } finally {
+      clearTimeout(flushTimer);
+      reader.releaseLock();
+      serialReaderRef.current = null;
+      if (serialKeepReadingRef.current) {
+        serialKeepReadingRef.current = false;
+        setIsSerialConnected(false);
+        setState(prev => ({ ...prev, isIoTConnected: false }));
       }
     }
   };
@@ -889,7 +628,7 @@ export default function App() {
               <div key="home-v2" className="w-full h-full">
                 {/* Lazy-load HomeV2 to avoid touching other screens' logic */}
                 <React.Suspense fallback={<div />}>
-                  <HomeV2 state={state} setScreenName={setActiveScreen} onStartBluetoothScan={startBluetoothScan} onDisconnectBluetooth={disconnectBluetooth} />
+                  <HomeV2 onResetBluetooth={resetBluetooth} serialBaudRate={serialBaudRate} onSerialBaudRateChange={changeSerialBaudRate} isSerialConnected={isSerialConnected} onReconnectSerial={reconnectSerial} serialDiagnostic={serialDiagnostic} bluetoothStatus={bluetoothStatus} onConnectSerial={() => connectSerial()} latestRawSerialData={latestRawSerialData} serialError={serialError} state={state} setScreenName={setActiveScreen} onStartBluetoothScan={startBluetoothScan} onDisconnectBluetooth={isSerialConnected ? disconnectSerial : disconnectBluetooth} />
                 </React.Suspense>
               </div>
             ) : (
@@ -913,7 +652,7 @@ export default function App() {
                 onSendMessage={handleSendMessage}
                 isAiLoading={isAiLoading}
                 presetQuestions={presetQuestions}
-                onToggleSimulateWalking={() => setState(prev => ({ ...prev, isSimulatingWalking: !prev.isSimulatingWalking }))}
+                onToggleSimulateWalking={() => setState(prev => prev.telemetry ? prev : ({ ...prev, isSimulatingWalking: !prev.isSimulatingWalking }))}
                 onTriggerPressureAlert={triggerPressureAlert}
                 onAddManualSteps={() => setState(prev => ({
                   ...prev,
@@ -974,12 +713,18 @@ export default function App() {
                     }
                   }));
                 }}
+                onResetBluetooth={resetBluetooth}
                 onStartBluetoothScan={startBluetoothScan}
                 onConnectBluetoothDevice={connectBluetoothDevice}
-                onDisconnectBluetooth={disconnectBluetooth}
+                onDisconnectBluetooth={isSerialConnected ? disconnectSerial : disconnectBluetooth}
+                serialBaudRate={serialBaudRate}
+                onSerialBaudRateChange={changeSerialBaudRate}
+                onReconnectSerial={reconnectSerial}
+               
+                serialDiagnostic={serialDiagnostic}
                 isSerialSupported={typeof navigator !== "undefined" && "serial" in navigator}
                 isSerialConnected={isSerialConnected}
-                onConnectSerial={connectSerial}
+                onConnectSerial={() => connectSerial()}
                 onDisconnectSerial={disconnectSerial}
                 serialError={serialError || undefined}
                 latestRawSerialData={latestRawSerialData}

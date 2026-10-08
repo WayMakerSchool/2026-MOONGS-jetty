@@ -7,7 +7,7 @@ export interface FootSensorData {
     piezo2?: number;
     piezo3?: number;
     piezo4?: number;
-    status: "normal" | "warning";
+    status: "normal" | "warning" | "danger";
   };
   rightFoot: {
     forefoot: number;
@@ -60,6 +60,8 @@ export interface ArduinoSensorData {
 }
 
 export interface AppState {
+  imuData?: { x?: number; y?: number; z?: number; updatedAt: string };
+  telemetry?: { received: boolean; hasPressure?: boolean; bilateral: boolean; hasMotion: boolean; adc?: boolean; hasSteps?: boolean; hasBattery?: boolean; estimated?: boolean };
   tightnessIntensity: number;
   isSimulatingWalking: boolean;
   isIoTConnected: boolean;
